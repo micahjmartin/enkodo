@@ -43,6 +43,8 @@ type Field struct {
 type Struct struct {
 	Name   string
 	Fields []Field
+
+	_hasLoopVar bool
 }
 
 func (s *Struct) String() string {
@@ -62,18 +64,6 @@ func (s *Struct) EncodeFunc(f io.Writer) error {
 func (s *Struct) DecodeFunc(f io.Writer) error {
 	fnRef := strings.ToLower(s.Name[0:1])
 	fmt.Fprintf(f, "func (%s *%s) UnmarshalEnkodo(dec *enkodo.Decoder) (err error) {\n", fnRef, s.Name)
-	// If one of the types is an array (not counting []byte) then we need to initialize a len variable
-	needsLen := false
-	for _, field := range s.Fields {
-		if field.Type[0] == '[' && field.Type != "[]byte" {
-			needsLen = true
-			break
-		}
-	}
-
-	if needsLen {
-		fmt.Fprintf(f, "%svar j int\n", ident)
-	}
 	for _, field := range s.Fields {
 		s.DecodeField(1, fnRef+"."+field.Name, field.Type, f)
 	}
@@ -143,14 +133,19 @@ func (s *Struct) DecodeField(identCount int, name, typ string, f io.Writer) (err
 
 	// Handle arrays
 	if typ[0] == '[' {
+		// Make sure we have this loop var initialized
+		if !s._hasLoopVar {
+			fmt.Fprintf(f, "%svar _arrLen int\n", dent)
+			s._hasLoopVar = true
+		}
 		// temp var for the type
 		init, temp := initType(typ)
 		fmt.Fprintf(f, "%s%s\n", dent, init)
 		// Read the len
-		s.DecodeField(identCount, "j", "int", f)
+		s.DecodeField(identCount, "_arrLen", "int", f)
 		// Make the buffer
-		fmt.Fprintf(f, "%s%s = make(%s, 0, j)\n", dent, name, typ)
-		fmt.Fprintf(f, "%sfor i := 0; i < j; i++ {\n", dent)
+		fmt.Fprintf(f, "%s%s = make(%s, 0, _arrLen)\n", dent, name, typ)
+		fmt.Fprintf(f, "%sfor i := 0; i < _arrLen; i++ {\n", dent)
 
 		if err := s.DecodeField(identCount+1, temp, typ[2:], f); err != nil {
 			return err
@@ -165,7 +160,7 @@ func (s *Struct) DecodeField(identCount int, name, typ string, f io.Writer) (err
 This function determines how to handle that properly */
 func initType(typ string) (init string, name string) {
 	clean_typ := strings.Trim(typ, "[]")
-	name = "kodo_" + strings.ToLower(strings.TrimLeft(clean_typ, "*"))
+	name = "_" + strings.ToLower(strings.TrimLeft(clean_typ, "*"))
 	if typ[0] == '*' {
 		init = fmt.Sprintf("var %s = new(%s)", name, clean_typ)
 	} else {
