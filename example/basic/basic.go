@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"log"
 
-	"github.com/mojura/enkodo"
+	"github.com/micahjmartin/enkodo"
 )
 
 func main() {
@@ -43,27 +43,10 @@ type User struct {
 	Twitter string
 }
 
-// MarshalEnkodo will marshal a User
-func (u *User) MarshalEnkodo(enc *enkodo.Encoder) (err error) {
-	enc.String(u.Email)
-	enc.Uint8(u.Age)
-	enc.String(u.Twitter)
-	return
-}
-
-// UnmarshalEnkodo will unmarshal a User
-func (u *User) UnmarshalEnkodo(dec *enkodo.Decoder) (err error) {
-	if u.Email, err = dec.String(); err != nil {
-		return
-	}
-
-	if u.Age, err = dec.Uint8(); err != nil {
-		return
-	}
-
-	if u.Twitter, err = dec.String(); err != nil {
-		return
-	}
-
-	return
+type Post struct {
+	Name    string
+	User    *User
+	Data    []byte
+	Numbers []int64
+	Users   []*User
 }
