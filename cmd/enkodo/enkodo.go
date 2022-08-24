@@ -40,14 +40,16 @@ var enc_types = map[string]string{
 const ident = "\t"
 
 type Field struct {
-	Name string
-	Type string
+	Name         string
+	Type         string
+	OverrideType string
 }
 
 type Struct struct {
 	Name   string
 	Fields []Field
 
+	_declared   map[string]string
 	_hasLoopVar bool
 }
 
@@ -56,10 +58,12 @@ func (s *Struct) String() string {
 }
 
 func (s *Struct) EncodeFunc(f io.Writer) error {
+	s._declared = make(map[string]string)
 	fnRef := strings.ToLower(s.Name[0:1])
 	fmt.Fprintf(f, "func (%s *%s) MarshalEnkodo(enc *enkodo.Encoder) (err error) {\n", fnRef, s.Name)
 	for _, field := range s.Fields {
-		s.EncodeField(1, fnRef+"."+field.Name, field.Type, f)
+		field.Name = fnRef + "." + field.Name
+		s.EncodeField(1, field, f)
 	}
 	fmt.Fprintf(f, ident+"return\n}\n\n")
 	return nil
@@ -69,54 +73,67 @@ func (s *Struct) DecodeFunc(f io.Writer) error {
 	fnRef := strings.ToLower(s.Name[0:1])
 	fmt.Fprintf(f, "func (%s *%s) UnmarshalEnkodo(dec *enkodo.Decoder) (err error) {\n", fnRef, s.Name)
 	for _, field := range s.Fields {
-		s.DecodeField(1, fnRef+"."+field.Name, field.Type, f)
+		field.Name = fnRef + "." + field.Name
+		s.DecodeField(1, field, f)
 	}
 	fmt.Fprint(f, ident+"return\n}\n\n")
 	return nil
 }
 
-func (s *Struct) EncodeField(identCount int, name, typ string, f io.Writer) (err error) {
+func (s *Struct) EncodeField(identCount int, field Field, f io.Writer) (err error) {
 	dent := strings.Repeat(ident, identCount)
-	if typ == "" || typ[0] == '[' && len(typ) == 2 {
-		fmt.Fprintf(f, "%s// Do not know what to do with %s (%s)\n", dent, name, typ)
+	name := field.Name
+	if field.OverrideType != "" {
+		name = fmt.Sprintf("%s(%s)", field.OverrideType, field.Name)
+		field.Type = field.OverrideType
+	}
+
+	if field.Type == "" || field.Type[0] == '[' && len(field.Type) == 2 {
+		fmt.Fprintf(f, "%s// Do not know what to do with %s (%s)\n", dent, field.Name, field.Type)
 		return
 	}
 
-	if result, ok := enc_types[typ]; ok {
+	if result, ok := enc_types[field.Type]; ok {
 		fmt.Fprintf(f, "%senc.%s(%s)\n", dent, result, name)
 		return
 	}
 
 	// Handle pointers to other types
-	if typ[0] == '*' {
+	if field.Type[0] == '*' {
 		fmt.Fprintf(f, "%senc.Encode(%s)\n", dent, name)
 		return
 	}
 
 	// Handle arrays
-	if typ[0] == '[' {
+	if field.Type[0] == '[' {
 		fmt.Fprintf(f, "%senc.Int(len(%s))\n", dent, name)
 		fmt.Fprintf(f, "%sfor _, v := range %s {\n", dent, name)
-		if err := s.EncodeField(identCount+1, "v", typ[2:], f); err != nil {
+		if err := s.EncodeField(identCount+1, Field{Name: "v", Type: field.Type[2:]}, f); err != nil {
 			return err
 		}
 		fmt.Fprintln(f, dent+"}")
 		return
 	}
 
-	fmt.Fprintf(f, "%s// Do not know what to do with %s (%s)\n", dent, name, typ)
+	fmt.Fprintf(f, "%s// Do not know what to do with %s (%s)\n", dent, field.Name, field.Type)
 	return nil
 }
 
-func (s *Struct) DecodeField(identCount int, name, typ string, f io.Writer) (err error) {
+func (s *Struct) DecodeField(identCount int, field Field, f io.Writer) (err error) {
 	dent := strings.Repeat(ident, identCount)
-	if typ == "" || typ[0] == '[' && len(typ) == 2 {
-		fmt.Fprintf(f, "%s// Do not know what to do with %s (%s)\n", dent, name, typ)
-		return
+	name := field.Name
+	var ogType string
+	if field.OverrideType != "" {
+		ogType = field.Type
+		field.Type = field.OverrideType
 	}
 
+	if field.Type == "" || field.Type[0] == '[' && len(field.Type) == 2 {
+		fmt.Fprintf(f, "%s// Do not know what to do with %s (%s)\n", dent, field.Name, field.Type)
+		return
+	}
 	// bytes is a special case for decode because we need to build the array
-	if typ == "[]byte" {
+	if field.Type == "[]byte" {
 		fmt.Fprintf(f, "%s%s = make([]byte, 0)\n", dent, name)
 		fmt.Fprintf(f, "%sif err = dec.Bytes(&%s); err != nil {\n", dent, name)
 		fmt.Fprintf(f, "%sreturn\n%s}\n", dent+ident, dent)
@@ -124,37 +141,50 @@ func (s *Struct) DecodeField(identCount int, name, typ string, f io.Writer) (err
 	}
 
 	// These basic functions are all error wrapped
-	if result, ok := enc_types[typ]; ok {
-		fmt.Fprintf(f, "%sif %s, err = dec.%s(); err != nil {\n", dent, name, result)
-		fmt.Fprintf(f, "%sreturn\n%s}\n", dent+ident, dent)
+	if result, ok := enc_types[field.Type]; ok {
+		// Special case for overrides where we assign it to a different value, then set it in the obj
+		init, varName := initType(field.Type)
+		if field.OverrideType != "" {
+			if _, ok := s._declared[varName]; !ok {
+				s._declared[varName] = field.Type
+				fmt.Fprintf(f, "%s%s\n", dent, init)
+			}
+
+			fmt.Fprintf(f, "%sif %s, err = dec.%s(); err != nil {\n", dent, varName, result)
+			fmt.Fprintf(f, "%sreturn\n%s}\n", dent+ident, dent)
+			fmt.Fprintf(f, "%s%s = %s(%s)\n", dent, name, ogType, varName)
+		} else {
+			fmt.Fprintf(f, "%sif %s, err = dec.%s(); err != nil {\n", dent, name, result)
+			fmt.Fprintf(f, "%sreturn\n%s}\n", dent+ident, dent)
+		}
 		return
 	}
 
 	// Handle pointers to other types
-	if typ[0] == '*' {
-		fmt.Fprintf(f, "%s%s = new(%s)\n", dent, name, strings.Trim(typ, "*"))
+	if field.Type[0] == '*' {
+		fmt.Fprintf(f, "%s%s = new(%s)\n", dent, name, strings.Trim(field.Type, "*"))
 		fmt.Fprintf(f, "%sif err = dec.Decode(%s); err != nil {\n", dent, name)
 		fmt.Fprintf(f, "%sreturn\n%s}\n", dent+ident, dent)
 		return
 	}
 
 	// Handle arrays
-	if typ[0] == '[' {
+	if field.Type[0] == '[' {
 		// Make sure we have this loop var initialized
-		if !s._hasLoopVar {
+		if _, ok := s._declared["_arrLen"]; !ok {
+			s._declared["_arrLen"] = "int"
 			fmt.Fprintf(f, "%svar _arrLen int\n", dent)
-			s._hasLoopVar = true
 		}
 		// temp var for the type
-		init, temp := initType(typ)
+		init, temp := initType(field.Type)
 		fmt.Fprintf(f, "%s%s\n", dent, init)
 		// Read the len
-		s.DecodeField(identCount, "_arrLen", "int", f)
+		s.DecodeField(identCount, Field{"_arrLen", "int", ""}, f)
 		// Make the buffer
-		fmt.Fprintf(f, "%s%s = make(%s, 0, _arrLen)\n", dent, name, typ)
+		fmt.Fprintf(f, "%s%s = make(%s, 0, _arrLen)\n", dent, name, field.Type)
 		fmt.Fprintf(f, "%sfor i := 0; i < _arrLen; i++ {\n", dent)
 
-		if err := s.DecodeField(identCount+1, temp, typ[2:], f); err != nil {
+		if err := s.DecodeField(identCount+1, Field{temp, field.Type[2:], ""}, f); err != nil {
 			return err
 		}
 		fmt.Fprintf(f, "%s%s = append(%s, %s)\n", dent+ident, name, name, temp)
@@ -209,34 +239,35 @@ func GetStructFields(obj *ast.Object) *Struct {
 	if !ok {
 		return nil // not a type definition
 	}
-
 	st, ok := ts.Type.(*ast.StructType)
 	if !ok {
 		return nil // not a struct
 	}
+
 	s := &Struct{
 		Name:   ts.Name.Name,
 		Fields: make([]Field, 0),
 	}
 
 	for _, field := range st.Fields.List {
-		fType := GetFieldType(field.Type)
-		// Override the type with anything in a struct tag. E.g. enkodo:"int"
-		if field.Tag != nil {
-			match := tag.FindStringSubmatch(field.Tag.Value)
-			if len(match) > 1 && len(match[1]) > 1 {
-				fType = match[1]
-			}
+		f := Field{
+			Name: field.Names[0].Name,
+			Type: GetFieldType(field.Type),
 		}
-		fName := field.Names[0].Name
-		if !unicode.IsUpper(rune(fName[0])) || fType == "" {
+		// Override the type with anything in a struct tag. E.g. enkodo:"int"
+		// skip fields that dont have the enkodo tag
+		if field.Tag == nil || !strings.Contains(field.Tag.Value, "enkodo") {
+			continue
+		}
+		match := tag.FindStringSubmatch(field.Tag.Value)
+		if len(match) > 1 && len(match[1]) > 1 {
+			f.OverrideType = match[1]
+		}
+		if !unicode.IsUpper(rune(f.Name[0])) || (f.Type == "" && f.OverrideType == "") {
 			// Only handle exported variables for now
 			continue
 		}
-		s.Fields = append(s.Fields, Field{
-			Name: fName,
-			Type: fType,
-		})
+		s.Fields = append(s.Fields, f)
 	}
 	if len(s.Fields) > 0 {
 		return s

@@ -36,17 +36,19 @@ func main() {
 	log.Printf("New user: %v", nu)
 }
 
+type SocialMedia string
+
 // User holds the basic information for a user
 type User struct {
-	Email   string
-	Age     uint8
-	Twitter string
+	Email   string      `enkodo:""`
+	Age     uint8       `enkodo:""`
+	Twitter SocialMedia `enkodo:"string"`
 }
 
 type Post struct {
-	Name    string
-	User    *User
-	Data    []byte
-	Numbers []int64
-	Users   []*User
+	Name    string  `enkodo:""`
+	User    *User   `enkodo:""`
+	Data    []byte  `enkodo:""`
+	Numbers []int64 `enkodo:""`
+	Users   []*User `enkodo:""`
 }
