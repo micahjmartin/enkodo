@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 )
 
 const packageName = "github.com/micahjmartin/enkodo"
@@ -176,8 +177,11 @@ func GetFieldType(f ast.Expr) (result string) {
 		result = t.Name
 	case *ast.StarExpr:
 		// pointer types
-		v := t.X.(*ast.Ident)
-		result = "*" + v.Name
+		if v, ok := t.X.(*ast.Ident); !ok {
+			return
+		} else {
+			result = "*" + v.Name
+		}
 	case *ast.ArrayType:
 		result = "[]" + GetFieldType(t.Elt)
 	default:
@@ -210,6 +214,10 @@ func GetStructFields(obj *ast.Object) *Struct {
 	for _, field := range st.Fields.List {
 		fType := GetFieldType(field.Type)
 		fName := field.Names[0].Name
+		if !unicode.IsUpper(rune(fName[0])) || fType == "" {
+			// Only handle exported variables for now
+			continue
+		}
 		s.Fields = append(s.Fields, Field{
 			Name: fName,
 			Type: fType,
